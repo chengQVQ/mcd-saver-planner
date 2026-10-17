@@ -1,0 +1,16 @@
+# 依赖
+node_modules/
+
+# 环境变量（严禁提交真实 Token）
+.env
+.env.local
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

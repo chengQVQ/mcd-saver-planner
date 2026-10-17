@@ -1,0 +1,26 @@
+{
+  "name": "mcd-saver-planner",
+  "version": "1.0.0",
+  "description": "麦麦极致省钱规划师 — 基于麦当劳 MCP 的全渠道点餐优惠决策引擎",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "demo": "node src/index.js --demo",
+    "test": "node test/run.js",
+    "lint": "node --check src/index.js"
+  },
+  "keywords": [
+    "mcd",
+    "mcp",
+    "mcdonalds",
+    "skill",
+    "contest",
+    "workbuddy"
+  ],
+  "license": "MIT",
+  "private": false
+}
