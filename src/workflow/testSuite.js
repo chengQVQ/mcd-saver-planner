@@ -6,7 +6,7 @@
  */
 
 import { parseIntent, INTENT } from '../modules/intent.js';
-import { extractMenuItems, matchItems, buildBudgetCombo } from '../modules/menuMatcher.js';
+import { extractMenuItems, matchItems, buildBudgetCombo, buildComboAroundItems } from '../modules/menuMatcher.js';
 import { calcBestPlans } from '../modules/priceEngine.js';
 import { parseStoreCoupons, parseMyCoupons, buildCombinations, bindCouponsToItems, areMutuallyExclusive } from '../modules/couponRules.js';
 import { compareChannels } from '../modules/channelCompare.js';
@@ -18,7 +18,7 @@ import { SessionContext, STATE } from './stateMachine.js';
 import { McdTools } from '../mcp/tools.js';
 import { McpClient } from '../mcp/client.js';
 import { createMockFetch } from '../../mock/transport.js';
-import { MOCK_MENU, MOCK_STORE_COUPONS, MOCK_MY_COUPONS } from '../../mock/data.js';
+import { MOCK_MENU, MOCK_STORE_COUPONS, MOCK_MY_COUPONS, REAL_MENU } from '../../mock/data.js';
 import { extractPrice, yuanToCent, formatYuan } from '../utils/money.js';
 import { McpError } from '../utils/retry.js';
 
@@ -59,6 +59,7 @@ export async function runAllTests() {
   await testOrder();
   testErrorHandling();
   testStateMachine();
+  await testGuidedWizard();
   await testEndToEnd();
 
   console.log(`\n${'─'.repeat(50)}`);
@@ -94,8 +95,8 @@ function testIntent() {
   assert('识别为「订单复购」', r4.intent === INTENT.ORDER_REPEAT, r4.intent);
 
   const r5 = parseIntent('随便来点');
-  assert('无法识别时降级为通用咨询', r5.intent === INTENT.GENERAL, r5.intent);
-  assert('生成补全话术', typeof r5.followUpQuestion === 'string' && r5.followUpQuestion.length > 0);
+  assert('无法识别时归为通用咨询', r5.intent === INTENT.GENERAL, r5.intent);
+  assert('通用咨询标记参数缺失', r5.missingFields.length > 0);
   console.log('');
 }
 
@@ -160,6 +161,46 @@ function testMenuMatcher() {
   const combo = buildBudgetCombo(items, 3000, 1);
   assert('预算搭配生成商品', combo.items.length > 0, String(combo.items.length));
   assert('预算搭配有说明文案', typeof combo.desc === 'string' && combo.desc.length > 0);
+
+  // ── 真实菜单回归（数据采自麦当劳 MCP 真实响应）──
+  // 防止「巨无霸」这类不含「堡」字的商品名被漏判品类
+  const realItems = extractMenuItems(REAL_MENU);
+  assert('真实菜单解析出商品', realItems.length >= 8, String(realItems.length));
+  assert('巨无霸被识别为汉堡类',
+    realItems.find((i) => i.name === '巨无霸')?.category === 'burger',
+    realItems.find((i) => i.name === '巨无霸')?.category);
+  assert('板烧鸡腿堡被识别为汉堡类',
+    realItems.find((i) => i.name === '板烧鸡腿堡')?.category === 'burger');
+  assert('薯条被识别为小食类',
+    realItems.find((i) => i.name === '薯条')?.category === 'fries');
+  assert('周边类商品被排除',
+    extractMenuItems({
+      data: { meals: { x1: { name: '麦当劳联名棒球帽', currentPrice: '39.9' } } }
+    }).length === 0);
+
+  // 预算绝不能超支（此前 30 元预算曾配出 63.5 元）
+  for (const budget of [1000, 3000, 5000, 10000, 20000]) {
+    const c = buildBudgetCombo(realItems, budget, 1);
+    assert(`${budget / 100}元预算不超支`, c.total <= budget, `实配 ${c.total / 100} 元`);
+  }
+
+  // 人数必须在预算内被满足或明确告知
+  const c2 = buildBudgetCombo(realItems, 5000, 2);
+  assert('2人50元配出2份主餐',
+    c2.items.find((i) => i.productCode === '1406')?.quantity === 2,
+    JSON.stringify(c2.items));
+  const c3 = buildBudgetCombo(realItems, 3000, 2);
+  assert('预算不足时明确说明人数缩水', c3.desc.includes('仅够'), c3.desc);
+
+  // 指定餐品 + 预算：必须以指定餐品为主体
+  const specified = matchItems(realItems, ['板烧鸡腿堡']);
+  assert('匹配到真实板烧鸡腿堡', specified.length > 0, JSON.stringify(specified));
+  const around = buildComboAroundItems(realItems, specified, 10000, 1);
+  assert('指定餐品成为主体',
+    around.items[0]?.productCode === '1406',
+    JSON.stringify(around.items));
+  assert('指定餐品搭配不超预算', around.total <= 10000, String(around.total));
+  assert('指定餐品补充不超过2样', around.items.length <= 3, String(around.items.length));
   console.log('');
 }
 
@@ -346,10 +387,10 @@ function testStateMachine() {
   assert('init → intentRecognizing', s.state === STATE.INTENT_RECOGNIZING);
 
   s.transition('paramsMissing');
-  assert('参数缺失 → paramMissing', s.state === STATE.PARAM_MISSING);
+  assert('参数缺失 → guidedAsking', s.state === STATE.GUIDED_ASKING, s.state);
 
   s.transition('paramsComplete');
-  assert('paramMissing → calculating', s.state === STATE.CALCULATING);
+  assert('guidedAsking → calculating', s.state === STATE.CALCULATING, s.state);
 
   s.transition('success');
   assert('calculating → planReady', s.state === STATE.PLAN_READY);
@@ -379,6 +420,93 @@ function testStateMachine() {
   console.log('');
 }
 
+async function testGuidedWizard() {
+  console.log('【引导式问卷】一次问一个，参数不丢失');
+
+  // 单测：createWizard
+  const { createWizard, fillAnswer, currentStep, wizardParams, renderProgress } =
+    await import('../modules/guidedFlow.js');
+
+  // 场景1：用户只说「巨无霸」，引导补全其余
+  let wiz = createWizard(INTENT.FOOD_OPTIMAL, { foodKeywords: ['巨无霸'] });
+  assert('已填字段被跳过（餐品已给）', wiz.steps[0]?.filled === true, JSON.stringify(wiz.steps[0]));
+  assert('第一个未填是取餐方式', currentStep(wiz)?.label?.includes('到店'), currentStep(wiz)?.label);
+
+  // 答「到店」
+  let r1 = fillAnswer(wiz, '到店');
+  assert('到店回答被接受', r1.ok === true, JSON.stringify(r1));
+  assert('beType=1 已填入', wiz.params.beType === 1, String(wiz.params.beType));
+
+  // 答「深圳宝安」
+  let r2 = fillAnswer(wiz, '深圳宝安');
+  assert('位置回答被接受', r2.ok === true);
+  assert('城市已填入', wiz.params.city === '深圳宝安', String(wiz.params.city));
+
+  // 答「2个人」
+  let r3 = fillAnswer(wiz, '2个人');
+  assert('人数回答被接受', r3.ok === true);
+  assert('人数=2', wiz.params.peopleCount === 2, String(wiz.params.peopleCount));
+  assert('问卷完成', r3.allDone === true);
+
+  // 关键断言：餐品字段未在后续回答中被覆盖
+  assert('餐品字段未被覆盖', wiz.params.foodKeywords?.[0] === '巨无霸',
+    JSON.stringify(wiz.params.foodKeywords));
+
+  // 场景2：用户一开始啥都没说，从餐品问起
+  const wiz2 = createWizard(INTENT.FOOD_OPTIMAL, {});
+  assert('空白用户第一个问餐品', currentStep(wiz2)?.label?.includes('吃什么') || currentStep(wiz2)?.label?.includes('想吃'), currentStep(wiz2)?.label);
+
+  // 场景3：跳过可选字段
+  const wiz3 = createWizard(INTENT.FOOD_OPTIMAL, { foodKeywords: ['巨无霸'], beType: 1, city: '深圳' });
+  // 下一项是 peopleCount（可选）
+  const stepInfo = currentStep(wiz3);
+  assert('剩余项为人数（可选）', stepInfo?.label?.includes('几个'), stepInfo?.label);
+  const skip = fillAnswer(wiz3, '跳过');
+  assert('跳过可选字段成功', skip.ok === true && skip.skipped === true, JSON.stringify(skip));
+  assert('跳过后问卷完成', wiz3.done === true);
+
+  // 场景4：必填字段被跳过应拒绝
+  const wiz4 = createWizard(INTENT.FOOD_OPTIMAL, {});
+  const blocked = fillAnswer(wiz4, '跳过');
+  assert('必填餐品不能跳过', blocked.ok === false && blocked.error?.includes('必填'), JSON.stringify(blocked));
+
+  // 场景5：无效回答给出明确错误
+  const wiz5 = createWizard(INTENT.FOOD_OPTIMAL, { foodKeywords: ['巨无霸'] });
+  const bad = fillAnswer(wiz5, '随便什么乱七八糟');
+  assert('无法识别取餐方式时报错', bad.ok === false, JSON.stringify(bad));
+
+  // 场景6：进度条渲染
+  const wiz6 = createWizard(INTENT.FOOD_OPTIMAL, { foodKeywords: ['巨无霸'], beType: 1 });
+  const progress = renderProgress(wiz6);
+  assert('进度条包含已完成数', /2\/4/.test(progress) || /2\/5/.test(progress), progress.slice(0, 60));
+  assert('进度条标记当前问题', progress.includes('← 当前问题'), progress.slice(0, 100));
+
+  console.log('');
+  // 端到端：通过 planner 跑完整引导流程
+  const { createPlanner } = await import('../factory.js');
+  const planner = createPlanner({ offline: true });
+
+  // 第一句：只说餐品
+  const step1 = await planner.handle('巨无霸');
+  assert('首句触发引导问卷', step1.type === 'wizard_ask', step1.type);
+  assert('第一个问题是取餐方式或位置', /到店|城市|地标|吃什么/.test(step1.message), step1.message);
+
+  // 逐步回答
+  const step2 = await planner.handle('到店');
+  assert('回答后继续问下一个', step2.type === 'wizard_ask', step2.type);
+
+  const step3 = await planner.handle('深圳宝安');
+  assert('继续问人数', step3.type === 'wizard_ask', step3.type);
+
+  const final = await planner.handle('1个人');
+  assert('全部填齐后生成方案', final.type === 'plans', final.type);
+  assert('方案中含原始餐品', (final.matchedItems || []).some((m) => m.name === '巨无霸'),
+    JSON.stringify(final.matchedItems?.map((m) => m.name)));
+  assert('中间回答未丢失（beType=1）', planner.session.params.beType === 1, JSON.stringify(planner.session.params));
+
+  console.log('');
+}
+
 async function testEndToEnd() {
   console.log('【端到端】完整链路');
 
@@ -398,7 +526,7 @@ async function testEndToEnd() {
 
   // 发起新需求时应从 planReady/ordered 回到 init（§10：* --新请求--> init）
   const r3 = await planner.handle('再来一单');
-  assert('新请求被正确接收', ['plans', 'clarification'].includes(r3.type), r3.type);
+  assert('新请求被正确接收', ['plans', 'no_result', 'wizard_ask'].includes(r3.type), r3.type);
   console.log('');
 }
 

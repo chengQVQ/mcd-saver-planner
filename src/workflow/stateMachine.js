@@ -11,6 +11,7 @@ export const STATE = {
   INIT: 'init',
   INTENT_RECOGNIZING: 'intentRecognizing',
   PARAM_MISSING: 'paramMissing',
+  GUIDED_ASKING: 'guidedAsking',   // 引导式问卷进行中
   CALCULATING: 'calculating',
   PLAN_READY: 'planReady',
   ORDER_CONFIRMING: 'orderConfirming',
@@ -23,7 +24,12 @@ export const STATE = {
 const TRANSITIONS = {
   [`${STATE.INIT}:userInput`]: STATE.INTENT_RECOGNIZING,
   [`${STATE.INTENT_RECOGNIZING}:paramsComplete`]: STATE.CALCULATING,
-  [`${STATE.INTENT_RECOGNIZING}:paramsMissing`]: STATE.PARAM_MISSING,
+  [`${STATE.INTENT_RECOGNIZING}:paramsMissing`]: STATE.GUIDED_ASKING,
+  [`${STATE.INTENT_RECOGNIZING}:guidedStart`]: STATE.GUIDED_ASKING,
+  [`${STATE.GUIDED_ASKING}:answer`]: STATE.GUIDED_ASKING,
+  [`${STATE.GUIDED_ASKING}:paramsComplete`]: STATE.CALCULATING,
+  [`${STATE.GUIDED_ASKING}:complete`]: STATE.CALCULATING,
+  [`${STATE.GUIDED_ASKING}:cancel`]: STATE.INIT,
   [`${STATE.PARAM_MISSING}:paramsComplete`]: STATE.CALCULATING,
   [`${STATE.PARAM_MISSING}:userInput`]: STATE.INTENT_RECOGNIZING,
   [`${STATE.CALCULATING}:success`]: STATE.PLAN_READY,
@@ -57,6 +63,8 @@ export class SessionContext {
     this.selectedPlanId = null;
     this.currentOrder = null;
     this.errorMsg = null;
+    /** 引导式问卷：在 GUIDED_ASKING 状态下持有 */
+    this.wizard = null;
   }
 
   /**
@@ -86,6 +94,7 @@ export class SessionContext {
     this.selectedPlanId = null;
     this.currentOrder = null;
     this.errorMsg = null;
+    this.wizard = null;
   }
 
   /** 选中方案 */

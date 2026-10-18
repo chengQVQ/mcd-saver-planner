@@ -19,7 +19,8 @@ import cache from '../utils/cache.js';
 import { formatYuan } from '../utils/money.js';
 import { SessionContext, STATE } from './stateMachine.js';
 import { parseIntent, INTENT } from '../modules/intent.js';
-import { extractMenuItems, matchItems, buildBudgetCombo } from '../modules/menuMatcher.js';
+import { createWizard, fillAnswer, currentStep, wizardParams, renderProgress } from '../modules/guidedFlow.js';
+import { extractMenuItems, matchItems, buildBudgetCombo, buildComboAroundItems } from '../modules/menuMatcher.js';
 import { calcBestPlans } from '../modules/priceEngine.js';
 import { compareChannels } from '../modules/channelCompare.js';
 import { recommendCombo } from '../modules/combo.js';
@@ -50,8 +51,13 @@ export class SaverPlanner {
   async handle(input) {
     logger.resetCallCount();
 
-    // 新一轮请求：若当前不在可接收输入的状态，先复位会话（§10 超时/新请求 → init）
+    // 新一轮请求：若当前不在可接收输入的状态，先复位会话
     this.ensureAcceptingInput();
+
+    // ── 引导问卷进行中：把本轮输入填入当前问题 ──
+    if (this.session.state === STATE.GUIDED_ASKING && this.session.wizard) {
+      return this.continueWizard(input);
+    }
 
     // ── 步骤 2：模块 1 需求解析 ──
     this.session.transition('userInput');
@@ -60,22 +66,24 @@ export class SaverPlanner {
 
     logger.info('FLOW', `意图识别：${parsed.intent}｜参数：${JSON.stringify(parsed.params)}`);
 
-    // ── 步骤 3：参数缺失 → 补全询问 ──
-    if (parsed.missingFields.length && parsed.intent !== INTENT.CAMPAIGN_QUERY) {
+    // ── 步骤 3：参数有缺失 → 进入引导问卷（一次问一个）──
+    // 活动查询/积分兑换等无字段依赖的意图跳过问卷直接执行
+    const wizardable = parsed.missingFields.length > 0 &&
+      parsed.intent !== INTENT.CAMPAIGN_QUERY &&
+      parsed.intent !== INTENT.POINTS_EXCHANGE &&
+      parsed.intent !== INTENT.GENERAL;
+
+    if (wizardable) {
+      const wizard = createWizard(parsed.intent, parsed.params);
+      this.session.wizard = wizard;
       this.session.params = parsed.params;
-      this.session.transition('paramsMissing');
-      return {
-        type: 'clarification',
-        intent: parsed.intent,
-        message: parsed.followUpQuestion,
-        missingFields: parsed.missingFields,
-        state: this.session.state
-      };
+      this.session.transition('paramsMissing'); // → GUIDED_ASKING
+      return this.askNext();
     }
 
     this.session.params = parsed.params;
 
-    // ── 步骤 4a：解析门店（意图解析只产出城市/地址，门店需结合渠道查询）──
+    // ── 步骤 4a：解析门店 ──
     await this.resolveStore(parsed.params);
 
     // ── 步骤 4/5：并行拉取数据 + 优惠计算 ──
@@ -94,6 +102,100 @@ export class SaverPlanner {
         state: STATE.ERROR
       };
     }
+  }
+
+  /**
+   * 引导问卷：填入用户的回答并推进
+   */
+  async continueWizard(input) {
+    const text = String(input ?? '').trim();
+
+    // 取消指令
+    if (/^(取消|退出|重来|重新开始|exit|cancel|reset)$/.test(text)) {
+      this.session.transition('cancel');
+      this.session.wizard = null;
+      return {
+        type: 'cancelled',
+        message: '已取消本次问卷，重新开始可以说点什么',
+        state: this.session.state
+      };
+    }
+
+    // 重置某个字段：用户说"预算改成50"
+    const amend = text.match(/^(?:预算|位置|人数|餐品|取餐方式|城市)[改成换设为是]+(.+)$/);
+    if (amend) {
+      return this.amendField(amend);
+    }
+
+    // 填入当前问题
+    this.session.transition('answer');
+    const wizard = this.session.wizard;
+    const result = fillAnswer(wizard, text);
+
+    if (!result.ok) {
+      return {
+        type: 'wizard_error',
+        message: result.error,
+        currentStep: currentStep(wizard),
+        progress: renderProgress(wizard),
+        state: this.session.state
+      };
+    }
+
+    // 全部填齐 → 执行
+    if (wizard.done) {
+      this.session.params = wizardParams(wizard);
+      this.session.transition('complete');
+      try {
+        // 重新解析意图（保持一致），但用问卷收集的完整参数
+        const parsed = { intent: wizard.intent, params: this.session.params, missingFields: [] };
+        await this.resolveStore(parsed.params);
+        const result = await this.executeIntent(parsed);
+        this.session.transition('success');
+        return {
+          ...result,
+          wizardSummary: renderProgress(wizard)   // 把问卷过程附在结果后，便于追溯
+        };
+      } catch (err) {
+        this.session.transition('failure');
+        this.session.errorMsg = err.message;
+        return { type: 'error', message: friendlyError(err), state: STATE.ERROR };
+      }
+    }
+
+    // 还有问题未答 → 问下一个
+    return this.askNext();
+  }
+
+  /** 生成下一问题 */
+  askNext() {
+    const wizard = this.session.wizard;
+    const step = currentStep(wizard);
+    if (!step) {
+      // 问卷已完整（理论上不会到这，但兜底）
+      this.session.transition('complete');
+      return { type: 'wizard_complete', state: this.session.state };
+    }
+
+    const required = step.required ? '（必填）' : '（可选，可输入「跳过」）';
+    return {
+      type: 'wizard_ask',
+      message: `${step.index}/${step.total}｜${step.label}${required}\n💡 ${step.hint}`,
+      currentStep: step,
+      progress: renderProgress(wizard),
+      state: this.session.state,
+      hint: '回答后我会接着问下一个；说「取消」可退出，说「预算改成50」可修改已填字段'
+    };
+  }
+
+  /** 修改已填字段 */
+  amendField(amendMatch) {
+    // 简化版：让用户重新回答对应步骤
+    return {
+      type: 'wizard_error',
+      message: '修改已填字段功能开发中。如需修改，请说「取消」后重新开始',
+      state: this.session.state
+    };
   }
 
   /** 按意图分发执行 */
@@ -121,13 +223,8 @@ export class SaverPlanner {
     const storeCode = params.storeCode;
 
     if (!storeCode) {
-      return {
-        type: 'clarification',
-        intent: parsed.intent,
-        message: `我在${params.city ?? ''}附近找到几家门店，请告诉我你更方便去哪家，或直接说「都算一下」，我会自动比价。`,
-        needStoreSelection: true,
-        state: this.session.state
-      };
+      // 门店未解析到 → 是位置查询失败的真实错误
+      throw new Error(`未找到${params.city ?? '附近'}的可营业门店，请确认城市名或换个位置`);
     }
 
     const menu = await this.tools.queryMeals({
@@ -138,9 +235,9 @@ export class SaverPlanner {
 
     if (!matched.length) {
       return {
-        type: 'clarification',
+        type: 'no_result',
         intent: parsed.intent,
-        message: `这家门店暂时没有「${params.foodKeywords.join('、')}」，换个餐品或让我按预算推荐？`,
+        message: `这家门店暂时没有「${params.foodKeywords.join('、')}」，换个餐品或让我按预算推荐`,
         state: this.session.state
       };
     }
@@ -186,24 +283,33 @@ export class SaverPlanner {
     const { params } = parsed;
     const storeCode = params.storeCode;
     if (!storeCode) {
-      return {
-        type: 'clarification',
-        message: `我在${params.city ?? ''}附近找到几家门店，你想在哪一家吃？`,
-        needStoreSelection: true,
-        state: this.session.state
-      };
+      throw new Error(`未找到${params.city ?? '附近'}的可营业门店，请确认城市名或换个位置`);
     }
 
     const menu = await this.tools.queryMeals({
       storeCode, beType: params.beType, beCode: params.beCode
     });
     const menuItems = extractMenuItems(menu);
-    const combo = buildBudgetCombo(menuItems, params.budget, params.peopleCount);
+
+    // ⚠️ 关键：用户已明确指定餐品时（如「板烧鸡腿堡，预算100」），
+    //    必须以指定餐品为主体，再在预算内补充小食/饮品，
+    //    而不能忽略用户诉求去做通用搭配。
+    const specified = matchItems(menuItems, params.foodKeywords);
+
+    let combo;
+    if (specified.length) {
+      combo = buildComboAroundItems(menuItems, specified, params.budget, params.peopleCount);
+    } else {
+      combo = buildBudgetCombo(menuItems, params.budget, params.peopleCount);
+    }
 
     if (!combo.items.length) {
       return {
-        type: 'clarification',
-        message: `预算${formatYuan(params.budget)}内暂时没有可搭配的商品，要不要提高一点预算？`,
+        type: 'no_result',
+        intent: parsed.intent,
+        message: menuItems.length
+          ? `预算${formatYuan(params.budget)}内这家门店暂无可搭配商品`
+          : '这家门店暂时取不到菜单，请稍后重试或换一家门店',
         state: this.session.state
       };
     }
@@ -218,9 +324,10 @@ export class SaverPlanner {
     return {
       type: 'plans',
       intent: parsed.intent,
-      message: `${combo.desc}。以下是实际可用优惠券算出的最低到手价：\n${this.buildPlanMessage([], plans)}`,
+      message: `${combo.desc}。以下是实际可用优惠券算出的最低到手价：\n${this.buildPlanMessage(combo.matchedItems ?? [], plans)}`,
       plans,
       budgetCombo: combo,
+      matchedItems: combo.matchedItems ?? [],
       callCount: logger.getCallCount(),
       state: this.session.state,
       nextActions: ['说「下单方案1」创建订单', '说「换个搭配」重新推荐']
@@ -254,7 +361,7 @@ export class SaverPlanner {
    */
   async runPoints(parsed) {
     if (!config.features.enablePointsExchange) {
-      return { type: 'clarification', message: '积分兑换能力已关闭', state: this.session.state };
+      throw new Error('积分兑换能力已关闭');
     }
 
     const advice = await optimizePoints({
@@ -264,7 +371,7 @@ export class SaverPlanner {
 
     if (!advice.bestCoupon) {
       return {
-        type: 'clarification',
+        type: 'no_result',
         intent: parsed.intent,
         message: advice.desc,
         advice,
@@ -292,8 +399,8 @@ export class SaverPlanner {
 
     if (!Array.isArray(list) || !list.length) {
       return {
-        type: 'clarification',
-        message: '没有找到你的历史订单，试试直接说想吃什么，我帮你找最划算的方案。',
+        type: 'no_result',
+        message: '没有找到你的历史订单，试试直接说想吃什么，我帮你找最划算的方案',
         state: this.session.state
       };
     }
@@ -306,8 +413,8 @@ export class SaverPlanner {
 
     if (!items.length) {
       return {
-        type: 'clarification',
-        message: `上次订单（${last.orderId ?? ''}）的商品信息不完整，请直接告诉我你想吃什么。`,
+        type: 'no_result',
+        message: `上次订单（${last.orderId ?? ''}）的商品信息不完整，请直接告诉我你想吃什么`,
         state: this.session.state
       };
     }
@@ -395,20 +502,23 @@ export class SaverPlanner {
       };
     }
 
-    // 待支付，需先进入确认态
+    // 状态复位：下单失败后（orderConfirming）或已下单（ordered）再次下单时，
+    // 需先回到 planReady，否则会触发非法状态转移。
+    if (this.session.state !== STATE.PLAN_READY && this.session.state !== STATE.INIT) {
+      this.session.state = STATE.PLAN_READY;
+    }
+
+    // 选中方案：planReady --selectPlan--> orderConfirming
     this.session.transition('selectPlan');
     this.session.selectPlan(plan.id);
 
-    if (!options.skipConfirm) {
-      this.session.transition('cancel'); // 等待用户显式确认
-      this.session.transition('selectPlan');
-    }
-
+    // 确认下单：orderConfirming --confirm--> ordering
     this.session.transition('confirm');
 
     const result = await executeOrder({
       tools: this.tools,
-      plan: { ...plan, orderType: plan.channel === 'delivery' ? 2 : 1 },
+      // 方案对象已自带 beType / orderType / beCode，无需再手工推导
+      plan,
       addressId: options.addressId ?? this.session.params.addressId,
       remark: options.remark,
       skipCouponBind: options.skipCouponBind
@@ -493,6 +603,10 @@ export class SaverPlanner {
    * planReady / ordered / error 等状态需先复位，避免跨状态非法跳转
    */
   ensureAcceptingInput() {
+    // 引导问卷进行中：不复位，让用户继续作答
+    if (this.session.state === STATE.GUIDED_ASKING && this.session.wizard) {
+      return;
+    }
     if (this.session.state !== STATE.INIT) {
       logger.info('FLOW', `新请求到达，复位会话（原状态 ${this.session.state}）`);
       this.session.reset();

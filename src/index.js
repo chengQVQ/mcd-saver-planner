@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 import config from './config.js';
 import logger from './utils/logger.js';
 import { createPlanner } from './factory.js';
+import { setLevel } from './utils/logger.js';
 
 export { createPlanner };
 
@@ -22,6 +23,14 @@ function render(result) {
   console.log('\n' + '─'.repeat(64));
   if (result.type === 'clarification') {
     console.log('💬 ' + result.message);
+  } else if (result.type === 'wizard_ask') {
+    console.log('❓ ' + result.message);
+    if (result.progress) console.log('  ' + result.progress.split('\n')[0]);
+  } else if (result.type === 'wizard_error') {
+    console.log('⚠️  ' + result.message);
+    if (result.progress) console.log('  ' + result.progress.split('\n')[0]);
+  } else if (result.type === 'cancelled') {
+    console.log('↩️  ' + result.message);
   } else if (result.type === 'plans') {
     console.log('💰 ' + result.message);
     if (result.comboAdvice?.needExtra) {
@@ -41,6 +50,8 @@ function render(result) {
     if (result.nextActions?.length) {
       console.log('\n👉 ' + result.nextActions.join('  |  '));
     }
+  } else if (result.type === 'no_result') {
+    console.log('📭 ' + (result.message || '暂无可用结果'));
   } else if (result.type === 'error') {
     console.log('⚠️  ' + result.message);
   } else {
@@ -79,13 +90,49 @@ async function runDemo() {
   console.log('─'.repeat(64));
 }
 
+/** 配置自检：确认 Token 是否已正确配置 */
+function showConfig() {
+  const token = config.mcp.token;
+  const masked = token
+    ? `${token.slice(0, 6)}****${token.slice(-4)}（长度 ${token.length}）`
+    : '未配置';
+
+  console.log('\n🍔 麦麦极致省钱规划师 · 配置自检\n');
+  console.log('─'.repeat(52));
+  console.log(`MCP Server : ${config.mcp.serverUrl}`);
+  console.log(`协议类型   : ${config.mcp.protocol}`);
+  console.log(`MCP Token  : ${masked}`);
+  console.log(`日志级别   : ${process.env.LOG_LEVEL || 'INFO'}`);
+  console.log(`限流阈值   : ${config.mcp.rateLimitPerMinute} 次/分钟`);
+  console.log('─'.repeat(52));
+
+  if (!token || token === 'YOUR_MCP_TOKEN_HERE') {
+    console.log('\n⚠️  尚未配置有效 Token，交互模式与在线调用将不可用。\n');
+    console.log('配置步骤：');
+    console.log('  1) 打开 https://open.mcd.cn/mcp doc 页面');
+    console.log('  2) 右上角【控制台】→【激活】→ 复制 MCP Token');
+    console.log('  3) 在项目根目录执行：cp .env.example .env');
+    console.log('  4) 用编辑器打开 .env，填入：MCP_TOKEN=你的token');
+    console.log('  5) 再次运行 node src/index.js --config 验证\n');
+    console.log('  仅想看效果？直接运行：node src/index.js --demo（无需 Token）\n');
+  } else {
+    console.log('\n✅ Token 已配置，可运行：node src/index.js\n');
+  }
+}
+
 /** 交互模式 */
 async function runInteractive() {
-  if (!config.mcp.token) {
-    console.error('\n❌ 未检测到 MCP Token。请先设置环境变量：');
-    console.error('   Windows (PowerShell):  $env:MCP_TOKEN = "your_token"');
-    console.error('   macOS/Linux:          export MCP_TOKEN="your_token"\n');
-    console.error('   或使用离线演示：node src/index.js --demo\n');
+  if (!config.mcp.token || config.mcp.token === 'YOUR_MCP_TOKEN_HERE') {
+    console.error('\n❌ 未检测到有效 MCP Token。请先配置：\n');
+    console.error('   方式一（推荐，零依赖）：');
+    console.error('     cp .env.example .env      （Windows: copy .env.example .env）');
+    console.error('     然后用编辑器打开 .env，填入 MCP_TOKEN=你的token\n');
+    console.error('   方式二（临时生效，仅当前窗口）：');
+    console.error('     Windows PowerShell :  $env:MCP_TOKEN = "your_token"');
+    console.error('     macOS/Linux         :  export MCP_TOKEN="your_token"\n');
+    console.error('   Token 申请地址：https://open.mcd.cn/mcp/doc（右上角【控制台】→【激活】）\n');
+    console.error('   自检配置：node src/index.js --config');
+    console.error('   无需 Token 先看效果：node src/index.js --demo\n');
     process.exit(1);
   }
 
@@ -143,23 +190,39 @@ async function main() {
   node src/index.js --demo                          离线演示（无需Token）
   node src/index.js                                 交互模式（需 MCP_TOKEN）
   node src/index.js "你的需求"                       单次执行
+  node src/index.js "你的需求" --offline             单次执行（用内置Mock，不联网）
+  node src/index.js --config                       配置自检（检查 Token）
   node src/index.js --order 1 --address ADDR001     下单方案 1（外送需 --address）
   node src/index.js --test                          运行验收测试
 
+通用选项:
+  -q, --quiet                静默模式，只输出结果（适合脚本调用/录屏）
+  --offline                  使用内置 Mock 数据，不请求真实接口
+
+Token 配置（零依赖，无需 npm install）:
+  cp .env.example .env        Windows 用: copy .env.example .env
+  然后编辑 .env 填入 MCP_TOKEN=你的token
+  Token 申请：https://open.mcd.cn/mcp/doc 右上角【控制台】→【激活】
+
 环境变量:
-  MCP_TOKEN        麦当劳 MCP Token（必填，交互/在线模式）
+  MCP_TOKEN        麦当劳 MCP Token（优先级高于 .env）
   MCD_MCP_URL      MCP 服务地址，默认 https://mcp.mcd.cn
   LOG_LEVEL        ERROR | WARN | INFO | DEBUG，默认 INFO
 `);
     return;
   }
 
+  if (has('--config')) return showConfig();
+
   if (has('--test')) {
     const { runAllTests } = await import('./workflow/testSuite.js');
     return runAllTests();
   }
 
-  if (has('--demo')) return runDemo();
+  if (has('--demo') || has('--offline-demo')) {
+    if (has('--quiet') || has('-q')) setLevel('ERROR');
+    return runDemo();
+  }
 
   const orderIdx = argv.find((a) => a.startsWith('--order'));
   if (orderIdx) {
@@ -174,6 +237,8 @@ async function main() {
 
   const query = argv.filter((a) => !a.startsWith('--')).join(' ');
   if (query) {
+    // --quiet：静默模式，只输出结果，适合脚本调用与录屏
+    if (has('--quiet') || has('-q')) setLevel('ERROR');
     const planner = createPlanner({ offline: has('--offline') });
     render(await planner.handle(query));
     return;

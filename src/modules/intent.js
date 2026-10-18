@@ -76,7 +76,7 @@ function cnToNumber(str) {
 /**
  * 解析用户输入，识别意图与提取参数
  * @param {string} input 用户原始文本
- * @returns {{intent:string, params:Object, missingFields:string[], followUpQuestion?:string}}
+ * @returns {{intent:string, params:Object, missingFields:string[]}}
  */
 export function parseIntent(input) {
   const text = String(input ?? '').trim();
@@ -85,9 +85,8 @@ export function parseIntent(input) {
   if (!text) {
     return {
       intent: INTENT.GENERAL,
-      params: { foodKeywords: [], budget: null, takeType: '未指定', city: null, address: null, peopleCount: 1 },
-      missingFields: ['需求'],
-      followUpQuestion: '请告诉我你想吃什么、预算多少，以及到店还是外送，我帮你算最划算的方案'
+      params: { foodKeywords: [], budget: null, takeType: '未指定', beType: null, orderType: null, city: null, address: null, peopleCount: 1 },
+      missingFields: ['需求']
     };
   }
 
@@ -98,6 +97,14 @@ export function parseIntent(input) {
       intent = rule.intent;
       break;
     }
+  }
+
+  // 2. 兜底升级：只要用户明确说了餐品或预算，就归为点餐意图，
+  //    让引导问卷接管补全，而不是当成"通用咨询"直接返回通用话术
+  if (intent === INTENT.GENERAL) {
+    const foodHit = FOOD_LEXICON.some((f) => f.aliases.some((a) => text.includes(a)));
+    const budgetHit = /\d+\s*(?:块|元|￥|¥)/.test(text);
+    if (foodHit || budgetHit) intent = INTENT.FOOD_OPTIMAL;
   }
 
   // 2. 实体提取
@@ -117,13 +124,10 @@ export function parseIntent(input) {
   params.beType = take.beType;
   params.orderType = take.orderType;
 
-  // 3. 参数校验
+  // 3. 参数校验（仅标记缺失，由引导问卷逐项补全）
   const missingFields = validate(intent, params);
 
-  // 4. 生成补全话术
-  const followUpQuestion = missingFields.length ? buildQuestion(missingFields, intent) : undefined;
-
-  return { intent, params, missingFields, followUpQuestion };
+  return { intent, params, missingFields };
 }
 
 /** 提取餐品关键词 */
@@ -212,26 +216,6 @@ function validate(intent, params) {
       if (!params.foodKeywords.length && !params.budget) missing.push('需求');
   }
   return missing;
-}
-
-const QUESTION_MAP = {
-  餐品或预算: '想吃点什么？或者告诉我预算范围，我按预算帮你配。',
-  餐品: '想吃哪几样？告诉我名称就行。',
-  预算: '这次预算大概多少？',
-  取餐方式: '到店自取、得来速还是麦乐送外送？',
-  位置: '你在哪个城市或附近哪个地标？',
-  位置信息: '你在哪个城市？',
-  关注餐品: '想关注哪款餐品？比如巨无霸、麦乐鸡。',
-  需求: '请告诉我你想吃什么、预算多少，以及到店还是外送，我帮你算最划算的方案'
-};
-
-/** 生成补全问句 */
-function buildQuestion(missingFields, intent) {
-  const questions = missingFields.map((f) => QUESTION_MAP[f] ?? `请补充${f}`);
-  if (intent === INTENT.ORDER_REPEAT) {
-    return '好的，我按你上次的订单来。另外，到店还是外送？';
-  }
-  return questions.join(' ');
 }
 
 export default { parseIntent, INTENT, FOOD_LEXICON };

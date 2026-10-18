@@ -9,7 +9,6 @@
  */
 
 import config from '../config.js';
-import { degrade } from '../utils/retry.js';
 import { formatYuan } from '../utils/money.js';
 
 /**
@@ -22,8 +21,8 @@ import { formatYuan } from '../utils/money.js';
  * @returns {Promise<Object>} 活动决策建议
  */
 export async function predictCampaign({ tools, foodKeywords = [], currentBestPrice = null }) {
-  // ── 步骤 1：获取活动日历 ──
-  const calendar = await degrade(() => tools.campaignCalendar({}), null, 'CAMPAIGN');
+  // ── 步骤 1：获取活动日历（失败即抛）──
+  const calendar = await tools.campaignCalendar({});
 
   const allActivities = normalizeCampaigns(calendar);
 

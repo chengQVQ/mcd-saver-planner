@@ -8,7 +8,6 @@
  */
 
 import logger from '../utils/logger.js';
-import { degrade } from '../utils/retry.js';
 import { formatYuan } from '../utils/money.js';
 
 /** 点餐类可兑换券分类（catRuleIds），点餐相关分类 */
@@ -23,8 +22,8 @@ const FOOD_CATEGORIES = ['1', '2', '3', '4'];
  * @returns {Promise<Object>} 积分兑换方案
  */
 export async function optimizePoints({ tools, currentPrice = null }) {
-  // ── 步骤 1：获取用户积分详情 ──
-  const account = await degrade(() => tools.queryMyAccount(), null, 'POINTS');
+  // ── 步骤 1：获取用户积分详情（失败即抛）──
+  const account = await tools.queryMyAccount();
   if (!account?.data) {
     return {
       availablePoints: 0,
@@ -52,8 +51,8 @@ export async function optimizePoints({ tools, currentPrice = null }) {
     };
   }
 
-  // ── 步骤 2：筛选点餐类可兑换券 ──
-  const goodsRaw = await degrade(() => tools.mallPointsProducts({ catRuleIds: '1' }), null, 'POINTS');
+  // ── 步骤 2：筛选点餐类可兑换券（失败即抛）──
+  const goodsRaw = await tools.mallPointsProducts({ catRuleIds: '1' });
   const goods = normalizeGoods(goodsRaw);
 
   if (!goods.length) {

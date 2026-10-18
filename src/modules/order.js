@@ -13,7 +13,6 @@
 import { BE_TYPE } from '../config.js';
 import logger from '../utils/logger.js';
 import { extractPrice, formatYuan } from '../utils/money.js';
-import { degrade } from '../utils/retry.js';
 
 /**
  * 执行下单全流程
@@ -46,74 +45,63 @@ export async function executeOrder({ tools, plan, addressId, remark, skipCouponB
   }
 
   // ── 步骤 1：一键领取麦麦省券 ──
+  // 领券失败不阻断下单（券可能已领过），但会如实记录
   if (!skipCouponBind) {
-    const bindResult = await degrade(() => tools.autoBindCoupons(), null, 'ORDER');
-    if (bindResult) {
+    try {
+      const bindResult = await tools.autoBindCoupons();
       const bound = extractCount(bindResult);
       logger.info('ORDER', bound ? `一键领券成功，新增 ${bound} 张` : '一键领券完成');
-    } else {
-      logger.warn('ORDER', '一键领券失败，将按方案原样下单');
+    } catch (err) {
+      logger.warn('ORDER', '一键领券失败，将按方案原样下单', err.message);
     }
   }
 
-  // ── 步骤 2：二次校验价格 ──
-  const verifyPayload = await degrade(
-    () => tools.calculatePrice({
-      storeCode: plan.storeCode,
-      beType,
-      items: plan.items,
-      beCode: plan.beCode,
-      withOrder: plan.withCard?.enabled ? withOrderPayload(plan.withCard) : undefined
-    }),
-    null,
-    'ORDER'
-  );
+  // ── 步骤 2：二次校验价格（失败即抛）──
+  const verifyPayload = await tools.calculatePrice({
+    storeCode: plan.storeCode,
+    beType,
+    items: plan.items,
+    beCode: plan.beCode,
+    withOrder: plan.withCard?.enabled ? withOrderPayload(plan.withCard) : undefined
+  });
 
   const verified = extractPrice(verifyPayload);
-  let actualPrice = plan.finalPrice;
+  const actualPrice = verified?.finalPrice ?? plan.finalPrice;
 
-  if (verified) {
-    actualPrice = verified.finalPrice;
-    if (typeof plan.finalPrice === 'number' && Math.abs(verified.finalPrice - plan.finalPrice) > 1) {
-      logger.warn(
-        'ORDER',
-        `价格校验不一致：方案 ${formatYuan(plan.finalPrice)} → 实际 ${formatYuan(verified.finalPrice)}`
-      );
-    }
-  } else {
-    logger.warn('ORDER', '价格校验失败，仍按方案价格尝试下单');
+  if (verified && typeof plan.finalPrice === 'number' && Math.abs(verified.finalPrice - plan.finalPrice) > 1) {
+    logger.warn(
+      'ORDER',
+      `价格校验不一致：方案 ${formatYuan(plan.finalPrice)} → 实际 ${formatYuan(verified.finalPrice)}`
+    );
   }
 
-  // ── 步骤 3：创建订单 ──
+  // ── 步骤 3：创建订单（失败即返回失败）──
   const takeWayCode = pickTakeWayCode(verifyPayload);
   if (plan.orderType === 1 && !takeWayCode) {
     return fail('未能获取取餐方式（takeWayCode），无法创建到店订单，请重试');
   }
 
-  const orderPayload = await degrade(
-    () => tools.createOrder({
-      storeCode: plan.storeCode,
-      beType,
-      beCode: plan.beCode,
-      items: plan.items,
-      takeWayCode,
-      addressId,
-      remark,
-      needTableware: false,
-      withOrder: plan.withCard?.enabled ? withOrderPayload(plan.withCard) : undefined
-    }),
-    null,
-    'ORDER'
-  );
-
-  if (!orderPayload) {
-    return fail('订单创建失败，可能是商品下架、优惠券失效或门店暂停营业');
-  }
+  const orderPayload = await tools.createOrder({
+    storeCode: plan.storeCode,
+    beType,
+    beCode: plan.beCode,
+    items: plan.items,
+    takeWayCode,
+    addressId,
+    remark,
+    needTableware: false,
+    withOrder: plan.withCard?.enabled ? withOrderPayload(plan.withCard) : undefined
+  });
 
   // ── 步骤 4：提取订单信息 ──
   const d = orderPayload?.data ?? {};
   const orderId = d.orderId ?? d.orderNo ?? d.id ?? null;
   const payUrl = d.payUrl ?? d.payLink ?? d.paymentUrl ?? d.url ?? null;
+
+  // ⚠️ 业务级失败：HTTP 200 但 success=false（如缺地址、券失效、门店停业）
+  if (orderPayload?.success === false) {
+    return fail(`订单创建被拒绝：${orderPayload.message ?? '原因未返回'}`);
+  }
 
   if (!orderId) {
     return fail(`订单响应缺少订单号：${JSON.stringify(orderPayload).slice(0, 200)}`);

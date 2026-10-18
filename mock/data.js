@@ -27,7 +27,9 @@ export const MOCK_MENU = {
     ],
     meals: {
       '1100': { name: '巨无霸', currentPrice: '26.5', originalPrice: '26.5', canWithOrder: false },
+      '1406': { name: '板烧鸡腿堡', currentPrice: '24', originalPrice: '24', canWithOrder: false },
       '9900005466': { name: '巨无霸三件套', currentPrice: '41', originalPrice: '51.5', canWithOrder: false },
+      '9900014838': { name: '枫糖风味厚松饼猪柳蛋堡三件套', currentPrice: '32.5', originalPrice: '42.5', canWithOrder: false },
       '9900014838': { name: '枫糖风味厚松饼猪柳蛋堡三件套', currentPrice: '32.5', originalPrice: '42.5', canWithOrder: false },
       '4810': { name: '薯条', currentPrice: '14.5', originalPrice: '14.5', canWithOrder: false },
       '515837': { name: '圆筒冰淇淋', currentPrice: '5', originalPrice: '5', canWithOrder: false },
@@ -231,8 +233,19 @@ export function mockCalculatePrice({ items = [], storeCode }) {
   };
 }
 
-/** 创建订单模拟 */
-export function mockCreateOrder() {
+/**
+ * 创建订单模拟
+ * @param {Object} args create-order 入参
+ * 外送场景（orderType=2）缺少 addressId 时模拟服务端拒绝，与真实行为一致
+ */
+export function mockCreateOrder(args = {}) {
+  if (args.orderType === 2 && !args.addressId) {
+    return {
+      success: false,
+      code: 400,
+      message: '外送场景缺少配送地址（addressId）'
+    };
+  }
   return {
     success: true,
     code: 200,
@@ -243,6 +256,37 @@ export function mockCreateOrder() {
     }
   };
 }
+
+/**
+ * 真实菜单响应采样
+ *
+ * 数据直接采自麦当劳 MCP Server 的 query-meals 真实返回（深圳门店），
+ * 保留真实商品名与价格结构，用于回归测试——
+ * 真实菜单里存在「巨无霸」这类不含「堡」字的商品名，
+ * 是品类识别逻辑的关键反例。
+ */
+export const REAL_MENU = {
+  success: true,
+  code: 200,
+  data: {
+    categories: [
+      { name: '巨无霸\n牛鱼肉堡', meals: [{ code: '1100', tags: [] }, { code: '1406', tags: [] }, { code: '9900005462', tags: [] }] },
+      { name: '炸鸡', meals: [{ code: '1700', tags: [] }, { code: '1401', tags: [] }] },
+      { name: '小食甜品\n/其他', meals: [{ code: '4810', tags: [] }, { code: '9900008752', tags: [] }] },
+      { name: '饮品', meals: [{ code: '9900008751', tags: [] }] }
+    ],
+    meals: {
+      '1100': { name: '巨无霸', currentPrice: '26.5', originalPrice: '26.5', canWithOrder: false },
+      '1406': { name: '板烧鸡腿堡', currentPrice: '24', originalPrice: '24', canWithOrder: false },
+      '9900005462': { name: '板烧鸡腿堡三件套', currentPrice: '38.5', originalPrice: '49', canWithOrder: false },
+      '4810': { name: '薯条', currentPrice: '14.5', originalPrice: '14.5', canWithOrder: false },
+      '9900008751': { name: '可乐', currentPrice: '10.5', originalPrice: '10.5', canWithOrder: false },
+      '1700': { name: '麦辣鸡翅', currentPrice: '15', originalPrice: '15', canWithOrder: false },
+      '1401': { name: '麦乐鸡', currentPrice: '15', originalPrice: '15', canWithOrder: false },
+      '9900008752': { name: '派', currentPrice: '9', originalPrice: '9', canWithOrder: false }
+    }
+  }
+};
 
 /**
  * 门店查询模拟
@@ -272,6 +316,6 @@ export function mockStores(beType) {
 
 export default {
   MOCK_STORE, MOCK_MENU, MOCK_STORE_COUPONS, MOCK_MY_COUPONS, MOCK_MMS_AVAILABLE,
-  MOCK_ACCOUNT, MOCK_POINTS_GOODS, MOCK_CAMPAIGN, MOCK_ORDER_LIST,
+  MOCK_ACCOUNT, MOCK_POINTS_GOODS, MOCK_CAMPAIGN, MOCK_ORDER_LIST, REAL_MENU,
   mockCalculatePrice, mockCreateOrder, mockStores
 };

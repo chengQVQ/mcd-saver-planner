@@ -90,15 +90,38 @@ node src/index.js --demo
 node src/index.js --test
 ```
 
-输出：**93 项断言全部通过**，覆盖意图识别、金额单位、券叠加规则、价格引擎、多渠道比价、凑单、活动预判、积分兑换、下单执行、异常处理、状态机与端到端链路。
+输出：**109 项断言全部通过**，覆盖意图识别、金额单位、券叠加规则、价格引擎、多渠道比价、凑单、活动预判、积分兑换、下单执行、异常处理、状态机与端到端链路。
 
-### 方式三：接入真实 MCP（交互模式）
+### 方式三：配置自检（随时可查 Token 状态）
+
+```bash
+node src/index.js --config
+```
+
+确认 Token 是否已生效，未配置时会给出逐步指引。
+
+### 方式四：接入真实 MCP（交互模式）
 
 **第 1 步：申请 MCP Token**
 
 访问 [麦当劳 MCP 控制台](https://open.mcd.cn/mcp/doc) → 右上角【控制台】→【激活】→ 复制 Token。
 
-**第 2 步：配置环境变量**
+**第 2 步：配置 Token（零依赖，无需 `npm install`）**
+
+```bash
+# 在项目根目录执行，复制配置模板
+cp .env.example .env          # Windows CMD: copy .env.example .env
+```
+
+然后用编辑器打开 `.env`，把占位符替换成你的真实 Token：
+
+```bash
+MCP_TOKEN=你的真实token
+```
+
+> `.env` 已在 `.gitignore` 中被忽略，可安全存放本地 Token，不会被提交到仓库。
+
+**也可以临时用环境变量**（优先级高于 `.env`，仅当前窗口有效）：
 
 ```bash
 # Windows PowerShell
@@ -108,7 +131,25 @@ $env:MCP_TOKEN = "your_mcp_token"
 export MCP_TOKEN="your_mcp_token"
 ```
 
-**第 3 步：启动**
+**第 3 步：验证配置**
+
+```bash
+node src/index.js --config
+```
+
+```
+🍔 麦麦极致省钱规划师 · 配置自检
+
+────────────────────────────────────────────────────
+MCP Server : https://mcp.mcd.cn
+协议类型   : streamablehttp
+MCP Token  : a1b2c3****9f8e（长度 40）
+────────────────────────────────────────────────────
+
+✅ Token 已配置，可运行：node src/index.js
+```
+
+**第 4 步：启动**
 
 ```bash
 node src/index.js
@@ -124,22 +165,149 @@ node src/index.js
 👉 说「下单方案1」创建订单  |  说「换个搭配」重新推荐
 ```
 
-### 方式四：单次执行
+### 方式五：单次执行
 
 ```bash
 node src/index.js "深圳宝安巨无霸套餐到店怎么最省"
 node src/index.js --order 1 --address ADDR12345   # 外送下单需指定地址
 ```
 
-### 方式五：作为 WorkBuddy Skill 使用
+### 方式六：作为 WorkBuddy Skill 使用
 
 在 WorkBuddy 中配置 MCP 连接器后，添加本仓库的 Skill 即可获得对话式体验。
 
 ---
 
-## 💬 使用示例
+## 💬 调用示例
 
-### 示例 1：指定餐品求最优
+### 🎯 想直接看效果？跑示例集
+
+```bash
+node examples/usage.js
+```
+
+内置 Mock 数据，**无需 Token**，9 个可运行示例覆盖全部场景。输出节选：
+
+```
+══════════════════════════════════════════════════════════════════
+  示例 1：一句话拿到最省方案
+══════════════════════════════════════════════════════════════════
+输入：深圳宝安，巨无霸，到店，怎么最省
+识别意图：指定餐品最优
+匹配商品：巨无霸
+
+  【方案1】巨无霸6元券
+    到手 ¥20.50（原价 ¥26.50，省 ¥6.00）
+    叠加1张券：巨无霸6元券，共省¥6.00，距离约0.7km
+  【方案2】原价方案（无可用优惠）
+    到手 ¥26.50（原价 ¥26.50，省 ¥0.00）
+
+本轮工具调用：9 次
+
+══════════════════════════════════════════════════════════════════
+  示例 3：多轮对话（下单闭环）
+══════════════════════════════════════════════════════════════════
+第1轮 >> 深圳宝安，巨无霸，到店，怎么最省
+  最优：巨无霸6元券 → ¥20.50
+第2轮 >> 下单方案1
+  ✅ 下单成功
+     订单号：MCD-20261017-8823
+     支付链接：https://pay.mcd.cn/...
+```
+
+---
+
+## 📞 三种调用方式
+
+### 方式 A：命令行（最简单）
+
+```bash
+# 交互模式（推荐，像聊天一样用）
+node src/index.js
+
+# 单次执行，直接出结果
+node src/index.js "深圳南山，巨无霸，到店，怎么最省"
+
+# 静默模式，只输出结果（适合脚本/录屏）
+node src/index.js "深圳南山，巨无霸，到店，怎么最省" -q
+
+# 用内置 Mock，不联网（无需 Token）
+node src/index.js --offline "深圳南山，巨无霸，到店，怎么最省"
+
+# 下单（外送需带地址）
+node src/index.js --order 1
+node src/index.js --order 1 --address ADDR12345
+```
+
+**支持的交互指令：**
+
+| 你说 | 效果 |
+| --- | --- |
+| 任意描述需求 | 出方案 |
+| `下单方案1` | 创建订单，返回支付链接 |
+| `换一家店` | 重新比价 |
+| `再便宜点` | 查看凑单建议 |
+| `exit` / `退出` | 退出 |
+
+### 方式 B：作为代码库调用
+
+```javascript
+import { createPlanner } from './src/factory.js';
+
+const planner = createPlanner();            // 不传 offline = 连真实接口
+
+// ① 一句话拿方案
+const result = await planner.handle('深圳南山，巨无霸，到店，怎么最省');
+
+if (result.type === 'plans') {
+  result.plans.forEach((p, i) => {
+    console.log(`方案${i + 1}: ${p.planName} → ¥${p.finalPrice / 100}`);
+  });
+}
+
+// ② 下单（注意：planner 是有状态的，上面的方案还在）
+const order = await planner.order(1);
+console.log(order.success ? order.payUrl : order.errorMsg);
+
+// ③ 查订单状态
+const status = await planner.queryOrder(order.orderId);
+```
+
+### 方式 C：编程式多轮对话
+
+```javascript
+const planner = createPlanner({ offline: true });
+
+// planner 内部维护会话状态，可连续多轮交互
+await planner.handle('深圳南山，巨无霸，到店，怎么最省');  // 第1轮：出方案
+await planner.order(1);                                    // 第2轮：下单
+await planner.queryOrder();                                // 第3轮：查状态
+
+// 发起全新需求时，handle() 会自动复位会话，无需手动 reset
+await planner.handle('再来一单');
+```
+
+**返回值结构：**
+
+| `result.type` | 含义 | 关键字段 |
+| --- | --- | --- |
+| `plans` | 出方案了 | `plans[]`、`matchedItems`、`comboAdvice`、`pointsAdvice` |
+| `clarification` | 信息不足，需追问 | `message`、`missingFields` |
+| `campaign` | 活动建议 | `advice.suggestion`、`advice.futureActivities` |
+| `points` | 积分建议 | `advice.bestCoupon`、`advice.pointValueRatio` |
+| `error` | 执行异常 | `message` |
+
+### 完整代码示例
+
+见 [`examples/usage.js`](./examples/usage.js)，覆盖 9 个场景，全部可直接运行。
+
+---
+
+## 📋 对话场景示例
+
+以下为**离线 Mock 数据**下的实际输出，真实结果以线上门店菜单与实时优惠为准。
+
+### 场景 1：指定餐品求最优
 
 ```
 👤 深圳宝安，巨无霸套餐，到店，怎么最省
@@ -148,7 +316,7 @@ node src/index.js --order 1 --address ADDR12345   # 外送下单需指定地址
 【方案2】到店自取原价方案    到手价 ¥26.50
 ```
 
-### 示例 2：按预算推荐
+### 场景 2：按预算推荐
 
 ```
 👤 30块预算，一个人，外送
@@ -159,7 +327,7 @@ node src/index.js --order 1 --address ADDR12345   # 外送下单需指定地址
 
 > 注：以上为**离线 Mock 数据**下的演示输出，真实结果以线上门店菜单与实时优惠为准。
 
-### 示例 3：活动预判
+### 场景 3：活动预判
 
 ```
 👤 最近巨无霸有活动吗
@@ -167,7 +335,7 @@ node src/index.js --order 1 --address ADDR12345   # 外送下单需指定地址
    建议等到活动开始再下单
 ```
 
-### 示例 4：积分最优兑换
+### 场景 4：积分最优兑换
 
 ```
 👤 用积分兑换最划算的券
@@ -175,7 +343,7 @@ node src/index.js --order 1 --address ADDR12345   # 外送下单需指定地址
    价值比0.0133 元/积分（全站最优）。兑换后剩余 736 积分
 ```
 
-### 示例 5：一键下单
+### 场景 5：一键下单
 
 ```
 👤 下单方案1
@@ -199,6 +367,8 @@ mcd-saver-planner/
 ├── mock/                        # 离线 Mock（真实响应采样）
 │   ├── data.js                  #   门店 / 菜单 / 券 / 积分 / 活动数据
 │   └── transport.js             #   Mock fetch 传输层
+├── examples/
+│   └── usage.js                 # 9 个可运行调用示例
 └── src/
     ├── index.js                 # CLI 入口
     ├── factory.js               # 规划器工厂（解耦 CLI 与测试）
@@ -219,7 +389,7 @@ mcd-saver-planner/
     ├── workflow/
     │   ├── mainFlow.js          # 主流程编排
     │   ├── stateMachine.js      # 会话状态机
-    │   └── testSuite.js         # 验收测试（93 项断言）
+    │   └── testSuite.js         # 验收测试（109 项断言）
     └── utils/
         ├── cache.js             # TTL 缓存
         ├── retry.js             # 指数退避 + 限流 + 降级

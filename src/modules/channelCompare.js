@@ -8,7 +8,6 @@
 import config, { BE_TYPE } from '../config.js';
 import logger from '../utils/logger.js';
 import { calcBestPlans } from './priceEngine.js';
-import { degrade } from '../utils/retry.js';
 
 /** 待比价的三个渠道 */
 const CHANNELS = [
@@ -31,25 +30,38 @@ const CHANNELS = [
 export async function compareChannels({ tools, items, city, keyword, addressId }) {
   const channelPlans = [];
 
-  // ── 步骤 1：匹配各渠道门店 ──
-  const [inStoreStores, driveThruStores, deliveryStores] = await Promise.all([
-    city || keyword
-      ? degrade(() => tools.queryNearbyStores({ beType: BE_TYPE.IN_STORE, searchType: 2, city, keyword }), null, 'CHANNEL')
-      : Promise.resolve(null),
-    city || keyword
-      ? degrade(() => tools.queryNearbyStores({ beType: BE_TYPE.DRIVE_THRU, searchType: 2, city, keyword }), null, 'CHANNEL')
-      : Promise.resolve(null),
-    addressId
-      ? degrade(() => tools.queryDeliveryStores({ addressId, beType: BE_TYPE.DELIVERY }), null, 'CHANNEL')
-      : degrade(() => tools.queryDeliveryAddresses(), null, 'CHANNEL').then((addrRes) => {
-          // 未指定地址时自动取第一个地址（用户已授权前提下）
-          const first = Array.isArray(addrRes?.data) ? addrRes.data[0] : null;
-          if (!first) return null;
-          return tools.queryDeliveryStores({ addressId: String(first.addressId ?? first.id ?? ''), beType: BE_TYPE.DELIVERY });
-        })
-  ]);
+  // ── 步骤 1：匹配各渠道门店（缺位置的渠道跳过，不降级）──
+  const storeQueries = [];
+  if (city || keyword) {
+    storeQueries.push(
+      tools.queryNearbyStores({ beType: BE_TYPE.IN_STORE, searchType: 2, city, keyword }).catch(() => null),
+      tools.queryNearbyStores({ beType: BE_TYPE.DRIVE_THRU, searchType: 2, city, keyword }).catch(() => null)
+    );
+  } else {
+    storeQueries.push(Promise.resolve(null), Promise.resolve(null));
+  }
 
-  // ── 步骤 2：取每个渠道距离最近的 1 家门店 ──
+  // 外送：有 addressId 直接查，没有就先取地址列表
+  let deliveryStorePromise;
+  if (addressId) {
+    deliveryStorePromise = tools.queryDeliveryStores({ addressId, beType: BE_TYPE.DELIVERY }).catch(() => null);
+  } else {
+    deliveryStorePromise = tools.queryDeliveryAddresses()
+      .then((addrRes) => {
+        const first = Array.isArray(addrRes?.data) ? addrRes.data[0] : null;
+        if (!first) return null;
+        return tools.queryDeliveryStores({
+          addressId: String(first.addressId ?? first.id ?? ''),
+          beType: BE_TYPE.DELIVERY
+        });
+      })
+      .catch(() => null);
+  }
+  storeQueries.push(deliveryStorePromise);
+
+  const [inStoreStores, driveThruStores, deliveryStores] = await Promise.all(storeQueries);
+
+  // ── 步骤 2：取每个渠道距离最近的 1 家营业门店 ──
   const candidates = [
     { beType: BE_TYPE.IN_STORE,   store: pickNearest(inStoreStores) },
     { beType: BE_TYPE.DRIVE_THRU, store: pickNearest(driveThruStores) },
@@ -57,7 +69,6 @@ export async function compareChannels({ tools, items, city, keyword, addressId }
   ].filter((c) => c.store);
 
   if (!candidates.length) {
-    logger.warn('CHANNEL', '无可用门店，请补充位置信息');
     return [];
   }
 

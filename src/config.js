@@ -2,8 +2,57 @@
  * 全局配置项定义
  *
  * 所有可配置项统一管理，禁止硬编码。
- * 敏感信息（Token）仅从环境变量读取，不落盘、不写入代码仓库。
+ * 敏感信息（Token）仅从环境变量或 .env 文件读取，不写入代码仓库。
+ * .env 已被 .gitignore 忽略，可安全存放本地 Token。
  */
+
+import { readFileSync, existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * 加载 .env 文件（零依赖实现）
+ *
+ * 优先级：真实环境变量 > .env 文件
+ * .env 中已存在的值不会被覆盖，避免误伤命令行显式传入的配置。
+ */
+function loadDotEnv() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const envPath = resolve(here, '..', '.env');
+    if (!existsSync(envPath)) return;
+
+    const content = readFileSync(envPath, 'utf8');
+    for (const rawLine of content.split('\n')) {
+      const line = rawLine.trim();
+      // 跳过空行与注释
+      if (!line || line.startsWith('#')) continue;
+
+      const eq = line.indexOf('=');
+      if (eq === -1) continue;
+
+      const key = line.slice(0, eq).trim();
+      let value = line.slice(eq + 1).trim();
+
+      // 去掉成对包裹的引号
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+
+      // 环境变量优先，不覆盖
+      if (key && process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // .env 读取失败不应影响程序运行，静默忽略
+  }
+}
+
+loadDotEnv();
 
 const num = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 

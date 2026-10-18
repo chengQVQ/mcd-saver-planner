@@ -12,7 +12,7 @@
 
 import config, { BE_TYPE } from '../config.js';
 import { extractPrice } from '../utils/money.js';
-import { degrade } from '../utils/retry.js';
+import logger from '../utils/logger.js';
 import { bindCouponsToItems } from './couponRules.js';
 
 /**
@@ -39,14 +39,10 @@ export async function recommendCombo({ tools, items, storeCode, beType, beCode, 
 
   if (!targetCoupon || !targetCoupon.threshold) return base;
 
-  // ── 步骤 1：计算当前总价与门槛差额 ──
-  const basePricePayload = await degrade(
-    () => tools.calculatePrice({ storeCode, beType, items, beCode }),
-    null,
-    'COMBO'
-  );
+  // ── 步骤 1：计算当前总价与门槛差额（失败即抛）──
+  const basePricePayload = await tools.calculatePrice({ storeCode, beType, items, beCode });
   const basePrice = extractPrice(basePricePayload);
-  if (!basePrice) return { ...base, desc: '价格计算失败，无法评估凑单' };
+  if (!basePrice) throw new Error('凑单评估失败：服务端未返回有效价格');
 
   const gap = targetCoupon.threshold - basePrice.originalPrice;
   if (gap <= 0) {
@@ -56,12 +52,8 @@ export async function recommendCombo({ tools, items, storeCode, beType, beCode, 
     };
   }
 
-  // ── 步骤 2：拉取门店低价小食 / 饮品 ──
-  const menu = await degrade(
-    () => tools.queryMeals({ storeCode, beType, beCode }),
-    null,
-    'COMBO'
-  );
+  // ── 步骤 2：拉取门店低价小食 / 饮品（失败即抛）──
+  const menu = await tools.queryMeals({ storeCode, beType, beCode });
   const candidates = pickComboCandidates(menu, gap);
   if (!candidates.length) {
     return { ...base, gapAmount: gap, desc: `还差${(gap / 100).toFixed(2)}元，但门店暂无合适凑单品` };
@@ -76,13 +68,15 @@ export async function recommendCombo({ tools, items, storeCode, beType, beCode, 
     ];
     const boundItems = bindCouponsToItems(comboItems, [targetCoupon]);
 
-    // eslint-disable-next-line no-await-in-loop
-    const payload = await degrade(
-      () => tools.calculatePrice({ storeCode, beType, items: boundItems, beCode }),
-      null,
-      'COMBO'
-    );
-    const price = extractPrice(payload);
+    let price = null;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const payload = await tools.calculatePrice({ storeCode, beType, items: boundItems, beCode });
+      price = extractPrice(payload);
+    } catch (err) {
+      // 单个凑单品验证失败 → 跳过，继续试下一个
+      logger.warn('COMBO', `凑单品 ${cand.name} 验证失败，跳过`, err.message);
+    }
     if (!price) continue;
 
     const candidate = {

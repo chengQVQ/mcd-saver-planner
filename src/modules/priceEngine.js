@@ -12,10 +12,10 @@
  *  6. 按最终价格升序取Top3
  */
 
-import config, { BE_TYPE } from '../config.js';
+import config, { BE_TYPE, BE_TYPE_RULE } from '../config.js';
 import logger from '../utils/logger.js';
 import { extractPrice, saveRate, formatYuan } from '../utils/money.js';
-import { degrade, sleep } from '../utils/retry.js';
+import { sleep } from '../utils/retry.js';
 import {
   parseStoreCoupons,
   parseMyCoupons,
@@ -51,11 +51,11 @@ export async function calcBestPlans({ tools, storeCode, beType, items, beCode, s
     quantity: Number(i.quantity) || 1
   }));
 
-  // ── 步骤 1：并行拉取数据 ──
+  // ── 步骤 1：并行拉取数据（失败即抛，不降级）──
   const [storeCouponsRaw, mmsCouponsRaw, myCouponsRaw] = await Promise.all([
-    degrade(() => tools.queryStoreCoupons({ storeCode, beType, beCode, reservationDate }), null, 'COUPON'),
-    degrade(() => tools.availableCoupons(), null, 'COUPON'),
-    degrade(() => tools.queryMyCoupons(), null, 'COUPON')
+    tools.queryStoreCoupons({ storeCode, beType, beCode, reservationDate }),
+    tools.availableCoupons(),
+    tools.queryMyCoupons()
   ]);
 
   const storeCoupons = parseStoreCoupons(storeCouponsRaw);
@@ -82,43 +82,46 @@ export async function calcBestPlans({ tools, storeCode, beType, items, beCode, s
     combinations = prioritizeCombinations(combinations, config.limits.maxCombinations);
   }
 
-  // ── 步骤 4：遍历组合调用 calculate-price ──
+  // ── 步骤 4：遍历组合调用 calculate-price（失败即抛）──
   const plans = [];
 
-  // 4.1 基线：不用券（必须计算，作为兜底与优惠对比基准）
+  // 4.1 基线：不用券（必须计算，作为优惠对比基准）
   const baseline = await priceOnce({
     tools, storeCode, beType, items: normalizedItems, beCode, combination: [], reservationDate
   });
-  if (baseline) plans.push(assemblePlan({
-    baseline, combination: [], storeCode, store, beType, items: normalizedItems
+  if (!baseline) {
+    throw new Error('价格计算失败：服务端未返回有效价格，请检查门店是否营业或商品是否在售');
+  }
+  plans.push(assemblePlan({
+    baseline, combination: [], storeCode, store, beType, beCode, items: normalizedItems
   }));
 
-  // 4.2 逐个组合计算（受并发与间隔约束）
+  // 4.2 逐个组合计算
   for (const combo of combinations) {
-    if (combo.length === 0) continue; // 空组合即基线，已计算
+    if (combo.length === 0) continue;
     if (logger.getCallCount() >= config.limits.maxCallsPerRound) {
-      logger.warn('PRICE', `已达单轮调用上限 ${config.limits.maxCallsPerRound}，停止枚举`);
+      logger.warn('PRICE', `已达单轮调用上限 ${config.limits.maxCallsPerRound}，停止枚举（已生成 ${plans.length} 个方案）`);
       break;
     }
 
     const boundItems = bindCouponsToItems(normalizedItems, combo);
-    // eslint-disable-next-line no-await-in-loop
-    const result = await priceOnce({
-      tools, storeCode, beType, items: boundItems, beCode, combination: combo, reservationDate
-    });
-
+    let result = null;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      result = await priceOnce({
+        tools, storeCode, beType, items: boundItems, beCode, combination: combo, reservationDate
+      });
+    } catch (err) {
+      // 单个券组合计算失败（券过期/不适用）→ 跳过该组合，继续试下一个
+      logger.warn('PRICE', `组合 ${combo.map((c) => c.title).join('+')} 计算失败，跳过`, err.message);
+    }
     if (result) {
       // eslint-disable-next-line no-await-in-loop
       await sleep(config.limits.batchInterval);
       plans.push(assemblePlan({
-        baseline: result, combination: combo, storeCode, store, beType, items: boundItems
+        baseline: result, combination: combo, storeCode, store, beType, beCode, items: boundItems
       }));
     }
-  }
-
-  if (!plans.length) {
-    logger.warn('PRICE', '所有价格计算均失败，返回降级方案');
-    return [degradedPlan({ storeCode, store, beType, items: normalizedItems })];
   }
 
   // ── 步骤 6：排序与截断 ──
@@ -135,23 +138,16 @@ export async function calcBestPlans({ tools, storeCode, beType, items, beCode, s
  * 调用 calculate-price（带降级）
  */
 async function priceOnce({ tools, storeCode, beType, items, beCode, combination, reservationDate }) {
-  const payload = await degrade(
-    () => tools.calculatePrice({ storeCode, beType, items, beCode, reservationDate }),
-    null,
-    'PRICE'
-  );
-  if (!payload) return null;
-
+  const payload = await tools.calculatePrice({ storeCode, beType, items, beCode, reservationDate });
   const price = extractPrice(payload);
   if (!price) return null;
-
   return { ...price, payload };
 }
 
 /**
  * 组装方案数据（§8.3 Plan 结构）
  */
-function assemblePlan({ baseline, combination, storeCode, store, beType, items }) {
+function assemblePlan({ baseline, combination, storeCode, store, beType, beCode, items }) {
   const withCard = detectWithOrder(baseline.payload);
   const originalPrice = baseline.originalPrice;
   const finalPrice = baseline.finalPrice;
@@ -163,6 +159,10 @@ function assemblePlan({ baseline, combination, storeCode, store, beType, items }
       : '原价方案（无可用优惠）',
     channel: channelKey(beType),
     channelLabel: CHANNEL_LABEL[beType] ?? '未知渠道',
+    // 完整渠道信息：下游下单模块依赖 beType / orderType 做参数校验
+    beType,
+    orderType: BE_TYPE_RULE[beType]?.orderType ?? (beType === BE_TYPE.DELIVERY || beType === BE_TYPE.GROUP_MEAL ? 2 : 1),
+    beCode: beCode ?? null,
     storeCode,
     storeName: store.storeName ?? '',
     items,
@@ -277,27 +277,6 @@ function dedupeCoupons(coupons) {
 }
 
 /** 全部计算失败时的降级方案 */
-function degradedPlan({ storeCode, store, beType, items }) {
-  return {
-    id: 'plan_degraded',
-    planName: '价格计算暂不可用',
-    channel: channelKey(beType),
-    channelLabel: CHANNEL_LABEL[beType] ?? '未知渠道',
-    storeCode,
-    storeName: store.storeName ?? '',
-    items,
-    usedCoupons: [],
-    withCard: { enabled: false, cardType: null, cardPrice: 0 },
-    originalPrice: null,
-    discountAmount: null,
-    deliveryFee: null,
-    finalPrice: null,
-    saveRate: 0,
-    recommendReason: '价格服务暂时不可用，以下数据可能延迟，请稍后重试',
-    tags: ['降级'],
-    rank: 1,
-    isBest: true
-  };
-}
+
 
 export default { calcBestPlans };
